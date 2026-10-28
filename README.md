@@ -28,7 +28,7 @@ Water forms a [:crystal]%% A solid whose atoms sit in a repeating pattern. %% wh
 
 The definition is kept in an Obsidian comment (`%% … %%`) right after the term, so reading view hides it even when the plugin is off. A bare `[:crystal]` is a term with no definition yet.
 
-The easy way to make one: select a word or phrase and run **Create nutshell from selection** from the command palette. With nothing selected, it uses the word under the cursor. The card opens in edit mode so you can type the definition. You can bind the command to a hotkey in **Settings → Hotkeys**.
+The easy way to make one: select a word or phrase and run **Nutshell: Create term from selection** from the command palette. With nothing selected, it uses the word under the cursor. The card opens in edit mode so you can type the definition. You can bind the command to a hotkey in **Settings → Hotkeys**.
 
 ### Heading terms (Nicky Case's syntax)
 
