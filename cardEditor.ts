@@ -62,15 +62,15 @@ class ImageWidget extends WidgetType {
   }
 
   toDOM(view: EditorView) {
-    const wrap = createEl("span", { cls: "nutshell-editor-image" });
+    const wrap = createSpan({ cls: "nutshell-editor-image" });
     const img = createEl("img", { attr: { src: this.src } });
-    if (this.width) img.style.width = `${this.width}px`;
+    if (this.width) img.setCssStyles({ width: `${this.width}px` });
     // The image's height is only known once it loads.
     img.addEventListener("load", () => view.requestMeasure());
 
     // Drag the corner handle to resize; the new width is written into the
     // embed's `|width` when the drag ends.
-    const handle = createEl("span", {
+    const handle = createSpan({
       cls: "nutshell-image-handle",
       attr: { "aria-label": "Drag to resize" },
     });
@@ -82,7 +82,7 @@ class ImageWidget extends WidgetType {
       const maxWidth = view.contentDOM.clientWidth;
       const resize = (move: PointerEvent) => {
         const width = startWidth + move.clientX - down.clientX;
-        img.style.width = `${Math.max(MIN_IMAGE_WIDTH, Math.min(maxWidth, width))}px`;
+        img.setCssStyles({ width: `${Math.max(MIN_IMAGE_WIDTH, Math.min(maxWidth, width))}px` });
       };
       const finish = () => {
         handle.removeEventListener("pointermove", resize);
@@ -141,7 +141,7 @@ class MathWidget extends WidgetType {
   }
 
   toDOM(view: EditorView) {
-    const wrap = createEl("span", {
+    const wrap = createSpan({
       cls: ["nutshell-editor-math", ...(this.display ? ["is-display"] : [])],
     });
     // Obsidian loads MathJax on first use; until then show the source.
@@ -197,9 +197,15 @@ const math = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field),
 });
 
+// No lookbehinds in these regexes: iOS before 16.4 can't parse them, which
+// would stop the plugin loading. What they would check (the character just
+// before a match) is checked in code instead.
+
 // Links: `[[note]]` / `[[note|alias]]` (target 1, alias 2), `[text](<url>)`
-// (3, 4) or `[text](url)` (5, 6). Not image embeds (`!`), not escaped `\[`.
-const LINK_RE = /(?<![!\\])\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]|(?<![!\\])\[([^\]\n]+)\]\(<([^>\n]+)>\)|(?<![!\\])\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+// (3, 4) or `[text](url)` (5, 6). Not image embeds or escaped `\[`: a match
+// with one of NOT_BEFORE_LINK just before it is skipped.
+const LINK_RE = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]|\[([^\]\n]+)\]\(<([^>\n]+)>\)|\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+const NOT_BEFORE_LINK = /[!\\]/;
 // A URL with a scheme (https:, mailto:, obsidian:…) opens outside the vault.
 export const EXTERNAL_LINK_RE = /^[a-z][a-z0-9+.-]*:/i;
 // A bare web URL in the text (autolinked, as Obsidian does), minus trailing
@@ -208,11 +214,13 @@ const BARE_URL_RE = /\bhttps?:\/\/[^\s<>]*[^\s<>.,;:!?'")\]]/g;
 // Pasted text that is a single URL, which wraps a selection into a link.
 const PASTED_URL_RE = /^[a-z][a-z0-9+.-]*:\/\/\S+$/i;
 // Emphasis, outermost first; `_` only at word boundaries (so snake_case and
-// URLs stay plain), as in Obsidian. Each regex captures the inner text.
-const EMPHASIS: [RegExp, string][] = [
-  [/\*\*\*(?=\S)([^\n]+?)(?<=\S)\*\*\*|(?<!\w)___(?=\S)([^\n]+?)(?<=\S)___(?!\w)/g, "nutshell-md-strong nutshell-md-em"],
-  [/\*\*(?=\S)([^\n]+?)(?<=\S)\*\*|(?<!\w)__(?=\S)([^\n]+?)(?<=\S)__(?!\w)/g, "nutshell-md-strong"],
-  [/(?<![*\\])\*(?=[^\s*])([^\n*]+?)(?<=[^\s\\])\*(?!\*)|(?<![\w\\])_(?=[^\s_])([^\n_]+?)(?<=\S)_(?!\w)/g, "nutshell-md-em"],
+// URLs stay plain), as in Obsidian. Each regex captures the inner text, which
+// can't start or end with a space, in group 1 (`*`) or 2 (`_`); then, for
+// each group, the characters that can't come just before the match.
+const EMPHASIS: [RegExp, string, [RegExp | null, RegExp | null]][] = [
+  [/\*\*\*(\S|\S[^\n]*?\S)\*\*\*|___(\S|\S[^\n]*?\S)___(?!\w)/g, "nutshell-md-strong nutshell-md-em", [null, /\w/]],
+  [/\*\*(\S|\S[^\n]*?\S)\*\*|__(\S|\S[^\n]*?\S)__(?!\w)/g, "nutshell-md-strong", [null, /\w/]],
+  [/\*([^\s*\\]|[^\s*][^\n*]*?[^\s\\*])\*(?!\*)|_([^\s_]|[^\s_][^\n_]*?[^\s_])_(?!\w)/g, "nutshell-md-em", [/[*\\]/, /[\w\\]/]],
 ];
 
 /**
@@ -240,6 +248,10 @@ function formatDecorations(view: EditorView): DecorationSet {
   LINK_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = LINK_RE.exec(text))) {
+    if (m.index > 0 && NOT_BEFORE_LINK.test(text[m.index - 1])) {
+      LINK_RE.lastIndex = m.index + 1;
+      continue;
+    }
     const start = m.index;
     const end = start + m[0].length;
     let from: number;
@@ -277,10 +289,15 @@ function formatDecorations(view: EditorView): DecorationSet {
     decos.push(Decoration.mark({ class: "nutshell-md-link is-external", attributes }).range(start, end));
     text = text.slice(0, start) + blank(m[0]) + text.slice(end);
   }
-  for (const [re, cls] of EMPHASIS) {
+  for (const [re, cls, notBefore] of EMPHASIS) {
     const mark = Decoration.mark({ class: cls });
     re.lastIndex = 0;
     while ((m = re.exec(text))) {
+      const not = notBefore[m[1] !== undefined ? 0 : 1];
+      if (not && m.index > 0 && not.test(text[m.index - 1])) {
+        re.lastIndex = m.index + 1;
+        continue;
+      }
       const inner = m[1] ?? m[2];
       const width = (m[0].length - inner.length) / 2;
       add(m.index, m.index + width, m.index + m[0].length - width, m.index + m[0].length, mark);
@@ -445,8 +462,7 @@ function listDecorations(view: EditorView): DecorationSet {
   const { state } = view;
   const tab = " ".repeat(state.tabSize);
   const widths = new Map<string, number>();
-  const probe = document.createElement("span");
-  probe.className = "nutshell-measure";
+  const probe = createSpan({ cls: "nutshell-measure" });
   view.dom.append(probe);
   const builder = new RangeSetBuilder<Decoration>();
   for (let n = 1; n <= state.doc.lines; n++) {

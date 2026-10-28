@@ -30,7 +30,7 @@ import { Term, TermRef, findTerm, inlineTerm, moveRef, parseTerms, shownTerms, t
  * The note body never reflows. Two kinds of term (syntax in terms.ts):
  *
  * - Inline: `[:crystal]%% definition %%`. The definition is hidden in an
- *   Obsidian comment next to the term. The "Create nutshell from selection"
+ *   Obsidian comment next to the term. The "Create term from selection"
  *   command makes one and opens its card in edit mode; clicking a card's
  *   text edits it later.
  * - Link (Nicky Case's convention): `[:beta](<#Beta Distribution>)` opens that
@@ -259,7 +259,7 @@ export default class NutshellPlugin extends Plugin {
     // within that definition), the same way in both.
     this.addCommand({
       id: "create-from-selection",
-      name: "Create nutshell from selection",
+      name: "Create term from selection",
       checkCallback: (checking) => {
         const card = focusedCardEditor();
         const active = this.app.workspace.activeEditor;
@@ -511,7 +511,7 @@ export default class NutshellPlugin extends Plugin {
     const reposition = (fromScroll = false) => {
       if (expanded) {
         // Layout comes from `.is-expanded` in styles.css.
-        overlay.style.top = overlay.style.left = overlay.style.maxWidth = "";
+        overlay.setCssStyles({ top: "", left: "", maxWidth: "" });
         return;
       }
       if (trigger && !trigger.isConnected) {
@@ -830,7 +830,7 @@ export default class NutshellPlugin extends Plugin {
       const file = await this.app.vault.createBinary(path, await image.arrayBuffer());
       return `!${this.app.fileManager.generateMarkdownLink(file, sourcePath)}`;
     } catch (e) {
-      new Notice(`Nutshell: couldn't save the image (${e instanceof Error ? e.message : e}).`);
+      new Notice(`Nutshell: couldn't save the image (${e instanceof Error ? e.message : String(e)}).`);
       return null;
     }
   }
@@ -913,7 +913,7 @@ export default class NutshellPlugin extends Plugin {
     const minLeft = bounded ? c.left : VIEWPORT_MARGIN;
     const win = overlay.win; // the card's window, which may be a popout
     const maxRight = bounded ? c.right : win.innerWidth - VIEWPORT_MARGIN;
-    overlay.style.maxWidth = `${maxRight - minLeft}px`; // narrow columns shrink the card
+    overlay.setCssStyles({ maxWidth: `${maxRight - minLeft}px` }); // narrow columns shrink the card
 
     const pr = overlay.getBoundingClientRect();
     let top = r.bottom + POPUP_MARGIN;
@@ -927,8 +927,10 @@ export default class NutshellPlugin extends Plugin {
       (r.left + r.right) / 2 - pr.width / 2,
       maxRight - pr.width,
     );
-    overlay.style.top = `${Math.max(VIEWPORT_MARGIN, top)}px`;
-    overlay.style.left = `${Math.max(minLeft, left)}px`;
+    overlay.setCssStyles({
+      top: `${Math.max(VIEWPORT_MARGIN, top)}px`,
+      left: `${Math.max(minLeft, left)}px`,
+    });
   }
 
   // — Target resolution (hidden-heading aware) —

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-nutshell",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Nutshell-style inline expandable explanations for Obsidian",
   "main": "main.js",
   "scripts": {
