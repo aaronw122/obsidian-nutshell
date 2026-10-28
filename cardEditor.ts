@@ -20,7 +20,7 @@ import {
 } from "@codemirror/view";
 import { Keymap, PaneType, finishRenderMath, loadMathJax, renderMath, setIcon } from "obsidian";
 import { OpenTerm, termDecorations } from "./livePreview";
-import { parseTerms } from "./terms";
+import { MATH_RE, blank, blankCode, parseTerms } from "./terms";
 
 /**
  * The editor inside a card: a small CodeMirror editor over the definition's
@@ -128,14 +128,6 @@ function imageDecorations(view: EditorView, resolve: ResolveImage): DecorationSe
   return builder.finish();
 }
 
-// Display math `$$…$$` (may span lines; group 1), or inline math `$…$` (group
-// 2): it can't start or end with a space, and a digit right after the closing
-// `$` means it was a price ("$5 and $6"), as in Obsidian.
-const MATH_RE = /\$\$([\s\S]+?)\$\$|\$(?=[^\s$])((?:\\.|[^$\\\n])*?[^\s\\])\$(?!\d)/g;
-// Code, where `$` is literal: fenced blocks, then inline code spans.
-const FENCED_CODE_RE = /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1[ \t]*$|(?![\s\S]))/gm;
-const INLINE_CODE_RE = /(`+)(?!`)[\s\S]*?[^`]\1(?!`)/g;
-
 class MathWidget extends WidgetType {
   constructor(
     readonly source: string,
@@ -163,14 +155,9 @@ class MathWidget extends WidgetType {
   }
 }
 
-/** `s` with every character but line breaks turned into a space (same length, so offsets still line up). */
-function blank(s: string): string {
-  return s.replace(/[^\n]/g, " ");
-}
-
 /** `text` with code and terms blanked out: their contents are never formatting. */
 function blankLiterals(text: string): string {
-  let out = text.replace(FENCED_CODE_RE, blank).replace(INLINE_CODE_RE, blank);
+  let out = blankCode(text);
   for (const t of parseTerms(out)) {
     out = out.slice(0, t.from) + blank(t.raw) + out.slice(t.to);
   }
