@@ -71,7 +71,10 @@ interface InlineSource {
   file: TFile | null; // note that edits are written to; null = read-only
 }
 
-/** A save failure the card has already told the user about. */
+/**
+ * A save failure the owning card has handled: it warned the user (or already
+ * had, for an earlier failure it is still retrying), so callers stay quiet.
+ */
 class ReportedError extends Error {}
 
 interface PopupOptions {
@@ -373,7 +376,9 @@ export default class NutshellPlugin extends Plugin {
       if (
         n.instanceOf(Text) &&
         n.data.includes("[:") &&
-        !n.parentElement?.closest("code, pre, .math")
+        // Text in a link is the link's label, never a term (and a `[:x]` there
+        // makes its label's count differ, so those cards open read-only).
+        !n.parentElement?.closest("code, pre, .math, a")
       ) {
         nodes.push(n);
       }
@@ -386,10 +391,12 @@ export default class NutshellPlugin extends Plugin {
       }
       return hits;
     });
-    // Each rendered `[:label]` pairs with the next source `[:label]` that shows
-    // as that text (a term, or an escaped literal, which stays text). When a
-    // label shows a different number of times in each, the pairing is a guess:
-    // its cards open read-only rather than risk editing the wrong term.
+    // Each rendered `[:label]` is matched, in order, with the next source
+    // `[:label]` that shows as that text (a term, or an escaped literal, which
+    // stays text). That assumes both list a label's occurrences in the same
+    // order; when a label shows a different number of times in each, the
+    // assumption is visibly off, and its cards open read-only rather than risk
+    // editing the wrong term.
     const tally = (labels: string[]) => {
       const counts = new Map<string, number>();
       for (const l of labels) counts.set(l, (counts.get(l) ?? 0) + 1);
@@ -405,15 +412,15 @@ export default class NutshellPlugin extends Plugin {
         if (i < 0) continue;
         const term = shown.splice(i, 1)[0];
         if (term.escaped) continue;
-        const sure = inSource.get(label) === inRendered.get(label);
+        const countsMatch = inSource.get(label) === inRendered.get(label);
         const trigger = this.makeTrigger(label, owner, () =>
           this.togglePopup(trigger, cardOwner, async () => {
             if (define) {
               const def = define(term);
-              return sure ? def : { ...def, save: null };
+              return countsMatch ? def : { ...def, save: null };
             }
             return this.inlineDefinition(
-              sure ? source.file : null,
+              countsMatch ? source.file : null,
               source.file?.path ?? sourcePath,
               term,
               termRef(source.text, term),
@@ -1056,12 +1063,16 @@ export default class NutshellPlugin extends Plugin {
   /** Rewrite an inline term with a new definition. */
   private async writeInline(file: TFile, label: string, ref: TermRef, body: string) {
     const next = inlineTerm(label, body);
+    // Where the term was found; `ref` moves only once the write succeeded, so
+    // a failed write can be retried against the unchanged note.
+    let found = null as { text: string; at: number } | null;
     const hit = await this.spliceNote(file, next, (text) => {
       const t = findTerm(text, ref);
-      if (t) moveRef(ref, text, t.from, next);
+      found = t && { text, at: t.from };
       return t;
     });
-    if (!hit) throw new Error(`couldn't find "${label}" in the note`);
+    if (!hit || !found) throw new Error(`couldn't find "${label}" in the note`);
+    moveRef(ref, found.text, found.at, next);
   }
 
   /**

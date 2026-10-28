@@ -57,7 +57,7 @@ Some cards are read-only:
 
 - A card for a whole note (a link with no `#heading`).
 - A heading term whose name matches more than one heading of the same kind. If a hidden `## :Beta` and a visible `## Beta` both exist, `[:beta](<#Beta>)` opens the hidden one.
-- An inline term whose label shows up in the rendered note a different number of times than in its markdown (for example, also as literal text inside a link), so Nutshell can't tell which one you clicked.
+- An inline term whose label shows up a different number of times in the rendered section (or card) than in its markdown, so Nutshell can't tell which one you clicked. For example, a `[:label]` inside a link's text counts in the markdown but isn't a term.
 
 If a save fails, Nutshell says so and keeps your text in the card. A save fails when the file can't be written, when the term was changed elsewhere, or when the term has an identical twin (same label and definition) and the note changed above it since the card opened, because Nutshell can no longer tell the two apart. Reopen the card to edit it again. If the card was already closed, Nutshell tries to copy the text to the clipboard, and its notice says whether that worked.
 
