@@ -4,7 +4,7 @@
     "module": "ESNext",
     "target": "ES2018",
     "moduleResolution": "node",
-    "lib": ["DOM", "ES2018"],
+    "lib": ["DOM", "ES2019"],
     "strict": true,
     "skipLibCheck": true,
     "noImplicitAny": true,
