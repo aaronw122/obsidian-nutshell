@@ -19,7 +19,8 @@ import {
 } from "obsidian";
 import { EXTERNAL_LINK_RE, createCardEditor } from "./cardEditor";
 import { nutshellLivePreview } from "./livePreview";
-import { Term, findTerm, inlineTerm, parseTerms } from "./terms";
+import { END_MARKER_RE, findSection, normalizeHeading } from "./sections";
+import { Term, TermRef, findTerm, inlineTerm, moveRef, parseTerms, shownTerms, termRef, trimBlankLines } from "./terms";
 
 /**
  * Nutshell for Obsidian
@@ -30,8 +31,8 @@ import { Term, findTerm, inlineTerm, parseTerms } from "./terms";
  *
  * - Inline: `[:crystal]%% definition %%`. The definition is hidden in an
  *   Obsidian comment next to the term. The "Create nutshell from selection"
- *   command makes one and opens its card in edit mode; the card's pencil
- *   edits it later.
+ *   command makes one and opens its card in edit mode; clicking a card's
+ *   text edits it later.
  * - Link (Nicky Case's convention): `[:beta](<#Beta Distribution>)` opens that
  *   heading's section. Definition headings written with a leading colon
  *   (`## :Beta Distribution`) are hidden from the reading-mode body.
@@ -49,13 +50,14 @@ interface ResolvedTarget {
   markdown: string;
   file: TFile;
   want: string | null; // normalized heading name; null when the link targets a whole note
+  ambiguous: boolean; // several headings match `want`; the first is shown
 }
 
 /** What a card shows; `save` is null for read-only cards. */
 interface Definition {
   markdown: string;
   path: string; // note the definition belongs to (for resolving links/embeds)
-  save: ((body: string) => void) | null;
+  save: ((body: string) => Promise<void>) | null; // rejects when the text can't be written
 }
 
 /** Loads a card's definition, or returns an error message to show instead. */
@@ -63,10 +65,17 @@ type DefinitionLoader = () => Promise<Definition | string>;
 
 /** Markdown behind rendered content, used to find inline definitions. */
 interface InlineSource {
-  text: string;
-  offset: number; // where `text` starts in the note; a hint for finding a term again
+  text: string; // the whole note (or definition) the content was rendered from
+  from: number; // the rendered part of `text`
+  to: number;
   file: TFile | null; // note that edits are written to; null = read-only
 }
+
+/**
+ * A save failure the owning card has handled: it warned the user (or already
+ * had, for an earlier failure it is still retrying), so callers stay quiet.
+ */
+class ReportedError extends Error {}
 
 interface PopupOptions {
   anchor?: () => { left: number; right: number; top: number; bottom: number } | null; // term position when there is no trigger (null: not rendered)
@@ -83,10 +92,9 @@ const VIEWPORT_MARGIN = 8; // closest the card gets to the window edge
 const COLUMN_SELECTOR = ".cm-content > *, .markdown-preview-sizer > *";
 // What scrolls a term: the editor, reading view, or (for nested terms) a card.
 const SCROLLER_SELECTOR = ".cm-scroller, .markdown-preview-view, .nutshell-popup";
-// A line containing only `%% end %%` (an Obsidian comment, invisible in reading
-// view) closes a definition early. Without it, a definition runs to the next
-// heading of equal-or-higher level.
-const END_MARKER_RE = /^\s*%%\s*end\s*%%\s*$/i;
+// Schemes a card link may open outside the vault. Others (javascript:, file:,
+// data:…) are refused: a definition is note text, possibly someone else's.
+const OPENABLE_URL_RE = /^(?:https?|mailto|obsidian):/i;
 
 /** The outermost column block around `el`, skipping the nested editors/sizers of embeds and table cells. */
 function columnOf(el: Element | null | undefined): HTMLElement | null {
@@ -176,14 +184,12 @@ function selectionIn(
     : null;
 }
 
-const HEADING_RE = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const IMAGE_EXT_RE = /^(png|jpe?g|gif|webp|svg|bmp|avif)$/i;
 // File extensions for pasted image types that don't match their MIME subtype.
 const IMAGE_EXT_BY_TYPE: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/svg+xml": "svg",
 };
-const FENCE_RE = /^ {0,3}(```|~~~)/;
 const SAVE_DELAY_MS = 400;
 // A term label can't span lines, contain brackets, or start with a colon.
 const INVALID_LABEL_RE = /^:|[\n[\]]/;
@@ -216,49 +222,13 @@ function canRenderCodeBlock(language: string): boolean {
   );
 }
 
-/** Forgiving heading match: drop a leading colon, lowercase, trim. */
-function normalizeHeading(s: string): string {
-  return s.replace(/^:\s*/, "").trim().toLowerCase();
-}
-
-/**
- * Locate the body of heading `want` (normalized) in `text` as character offsets
- * [from, to): `from` is the end of the heading line, `to` is just before the
- * line that closes it (`%% end %%` or the next heading of equal-or-higher
- * level), or the end of the text. Headings inside code fences are ignored.
- */
-function findSection(
-  text: string,
-  want: string,
-): { from: number; to: number } | null {
-  let offset = 0;
-  let fence: string | null = null;
-  let open: { level: number; from: number } | null = null;
-  for (const line of text.split("\n")) {
-    const start = offset;
-    offset += line.length + 1;
-    const f = FENCE_RE.exec(line);
-    if (f) {
-      fence = fence === null ? f[1] : f[1] === fence ? null : fence;
-      continue;
-    }
-    if (fence) continue;
-    const h = HEADING_RE.exec(line);
-    if (open) {
-      if (END_MARKER_RE.test(line) || (h && h[1].length <= open.level)) {
-        return { from: open.from, to: start - 1 };
-      }
-    } else if (h && normalizeHeading(h[2] ?? "") === want) {
-      open = { level: h[1].length, from: start + line.length };
-    }
-  }
-  return open && { from: open.from, to: text.length };
-}
-
 export default class NutshellPlugin extends Plugin {
   private openPopups: ActivePopup[] = [];
-  /** Card editors → the card they belong to (for creating terms inside them). */
-  private cardEditors = new WeakMap<EditorView, { owner: Component; path: string }>();
+  /** Card editors → the card they belong to (for creating terms inside them, and saving through it). */
+  private cardEditors = new WeakMap<
+    EditorView,
+    { owner: Component; path: string; save: () => Promise<void> }
+  >();
   /** Windows that already have the card handling (see watchWindow). */
   private watchedWindows = new WeakSet<Window>();
 
@@ -396,46 +366,74 @@ export default class NutshellPlugin extends Plugin {
     });
 
     if (!source) return;
-    const terms = parseTerms(source.text, source.offset).filter(
+    const shown = shownTerms(source.text.slice(source.from, source.to), source.from).filter(
       (t) => t.target === null,
     );
-    if (terms.length === 0) return;
+    if (shown.length === 0) return;
     const nodes: Text[] = [];
     const walker = rootEl.doc.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
       if (
         n.instanceOf(Text) &&
         n.data.includes("[:") &&
-        !n.parentElement?.closest("code, pre, .math")
+        // Text in a link is the link's label, never a term (and a `[:x]` there
+        // makes its label's count differ, so those cards open read-only).
+        !n.parentElement?.closest("code, pre, .math, a")
       ) {
         nodes.push(n);
       }
     }
-    for (const node of nodes) {
-      const parts: (string | HTMLElement)[] = [];
+    const found = nodes.map((node) => {
+      const hits: { at: number; end: number; label: string }[] = [];
       const re = /\[:([^\]\n]+)\]/g;
-      let last = 0;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(node.data))) {
-        // Pair each rendered `[:label]` with the next unused source term of that label.
-        const label = m[1].replace(/^\s+/, "");
-        const i = terms.findIndex((t) => t.label === label);
-        if (i < 0) continue;
-        const term = terms.splice(i, 1)[0];
-        const trigger = this.makeTrigger(label, owner, () =>
-          this.togglePopup(trigger, cardOwner, async () =>
-            define
-              ? define(term)
-              : this.inlineDefinition(source.file, source.file?.path ?? sourcePath, term),
-          ),
-        );
-        parts.push(node.data.slice(last, m.index), trigger);
-        last = m.index + m[0].length;
+      for (let m = re.exec(node.data); m; m = re.exec(node.data)) {
+        hits.push({ at: m.index, end: m.index + m[0].length, label: m[1].replace(/^\s+/, "") });
       }
-      if (last === 0) continue;
+      return hits;
+    });
+    // Each rendered `[:label]` is matched, in order, with the next source
+    // `[:label]` that shows as that text (a term, or an escaped literal, which
+    // stays text). That assumes both list a label's occurrences in the same
+    // order; when a label shows a different number of times in each, the
+    // assumption is visibly off, and its cards open read-only rather than risk
+    // editing the wrong term.
+    const tally = (labels: string[]) => {
+      const counts = new Map<string, number>();
+      for (const l of labels) counts.set(l, (counts.get(l) ?? 0) + 1);
+      return counts;
+    };
+    const inSource = tally(shown.map((t) => t.label));
+    const inRendered = tally(found.flat().map((h) => h.label));
+    nodes.forEach((node, k) => {
+      const parts: (string | HTMLElement)[] = [];
+      let last = 0;
+      for (const { at, end, label } of found[k]) {
+        const i = shown.findIndex((t) => t.label === label);
+        if (i < 0) continue;
+        const term = shown.splice(i, 1)[0];
+        if (term.escaped) continue;
+        const countsMatch = inSource.get(label) === inRendered.get(label);
+        const trigger = this.makeTrigger(label, owner, () =>
+          this.togglePopup(trigger, cardOwner, async () => {
+            if (define) {
+              const def = define(term);
+              return countsMatch ? def : { ...def, save: null };
+            }
+            return this.inlineDefinition(
+              countsMatch ? source.file : null,
+              source.file?.path ?? sourcePath,
+              term,
+              termRef(source.text, term),
+            );
+          }),
+        );
+        parts.push(node.data.slice(last, at), trigger);
+        last = end;
+      }
+      if (last === 0) return;
       parts.push(node.data.slice(last));
       node.replaceWith(...parts);
-    }
+    });
   }
 
   private makeTrigger(
@@ -468,13 +466,17 @@ export default class NutshellPlugin extends Plugin {
     if (!el.textContent?.includes("[:")) return null;
     const info = ctx.getSectionInfo(el);
     if (!info) return null;
+    // Offsets of the section's first and last line in the whole note.
     const lines = info.text.split("\n");
+    let from = 0;
+    for (let i = 0; i < info.lineStart; i++) from += lines[i].length + 1;
+    let to = from;
+    for (let i = info.lineStart; i <= info.lineEnd && i < lines.length; i++) to += lines[i].length + 1;
     const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
     return {
-      text: lines.slice(info.lineStart, info.lineEnd + 1).join("\n"),
-      offset: lines
-        .slice(0, info.lineStart)
-        .reduce((n, line) => n + line.length + 1, 0),
+      text: info.text,
+      from,
+      to: Math.min(to, info.text.length),
       file: file instanceof TFile ? file : null,
     };
   }
@@ -582,24 +584,70 @@ export default class NutshellPlugin extends Plugin {
     });
 
     // Editable cards switch to a markdown editor when their text is clicked;
-    // it writes back into the note as you type.
+    // it writes back into the note as you type. Writes run one at a time, so
+    // each finds the term where the previous one left it.
     const { save: persist } = def;
-    let body = def.markdown;
+    let body = def.markdown; // the card's text, written to the note or not
+    let saved = body; // the text last written to the note
+    let writing: Promise<void> = Promise.resolve();
+    let failing = false; // the last write failed (an open card warns once until one succeeds)
+    let closed = false;
     let rendered: Component | null = null; // current render tree; owns nested cards
     let editor: EditorView | null = null;
     let saveTimer: number | null = null;
 
+    /** Write `body` after any write in progress; rejects (with a ReportedError) when it fails. */
+    const flush = (): Promise<void> => {
+      if (!persist) return Promise.resolve();
+      const write = writing.then(async () => {
+        const next = body;
+        if (next === saved) return;
+        try {
+          await persist(next);
+          saved = next;
+          failing = false;
+        } catch (e) {
+          const reported = failing;
+          failing = true;
+          // A nested card's failed write was reported by the card it writes into.
+          if (e instanceof ReportedError) throw e;
+          const why = e instanceof Error ? e.message : String(e);
+          if (closed) {
+            // The card is gone with the only copy of the text: try to hand it over.
+            let copied = false;
+            try {
+              await navigator.clipboard.writeText(next);
+              copied = true;
+            } catch {
+              /* reported below */
+            }
+            new Notice(
+              copied
+                ? `Nutshell: couldn't save the definition (${why}). It was copied to the clipboard.`
+                : `Nutshell: couldn't save the definition (${why}), or copy it to the clipboard. It is lost.`,
+              0, // stays until dismissed
+            );
+          } else if (!reported) {
+            new Notice(
+              `Nutshell: couldn't save the definition (${why}). Your text stays in the card and is saved again on the next edit.`,
+            );
+          }
+          throw new ReportedError(why);
+        }
+      });
+      writing = write.catch(() => {}); // the next write runs either way
+      return write;
+    };
+    /** Take the editor's text and write it now. */
     const save = () => {
       if (saveTimer !== null) window.clearTimeout(saveTimer);
       saveTimer = null;
-      if (!editor || !persist) return;
-      const next = editor.state.doc.toString().trim();
-      if (next === body) return;
-      body = next;
-      persist(next);
+      if (editor) body = trimBlankLines(editor.state.doc.toString());
+      return flush();
     };
+    const ignore = () => {}; // failures are already reported
     const closeEditor = () => {
-      save();
+      void save().catch(ignore);
       editor?.destroy();
       editor = null;
     };
@@ -623,21 +671,22 @@ export default class NutshellPlugin extends Plugin {
         rendered,
         rendered,
         def.path,
-        { text: body, offset: 0, file: null },
+        { text: body, from: 0, to: body.length, file: null },
         persist
           ? (term) => {
-              const ref = { raw: term.raw, at: term.from };
+              const ref = termRef(body, term);
               return {
                 markdown: term.definition,
                 path: def.path,
-                save: (nested) => {
+                // Written into this card's text, then this card writes it to
+                // the note: done only when that is.
+                save: async (nested) => {
                   const cur = findTerm(body, ref);
-                  if (!cur) return;
+                  if (!cur) throw new Error(`couldn't find "${term.label}" in the outer definition`);
                   const next = inlineTerm(term.label, nested);
+                  moveRef(ref, body, cur.from, next);
                   body = body.slice(0, cur.from) + next + body.slice(cur.to);
-                  ref.raw = next;
-                  ref.at = cur.from;
-                  persist(body);
+                  await flush();
                 },
               };
             }
@@ -660,7 +709,7 @@ export default class NutshellPlugin extends Plugin {
       const view = createCardEditor(content, body, {
         onChange: () => {
           if (saveTimer !== null) window.clearTimeout(saveTimer);
-          saveTimer = window.setTimeout(save, SAVE_DELAY_MS);
+          saveTimer = window.setTimeout(() => void save().catch(ignore), SAVE_DELAY_MS);
         },
         resolveImage: (target) => this.imageUrl(target, def.path),
         saveImage: (image, dropped) => this.saveImage(image, dropped, def.path),
@@ -685,7 +734,7 @@ export default class NutshellPlugin extends Plugin {
         },
       });
       editor = view;
-      this.cardEditors.set(view, { owner: component, path: def.path });
+      this.cardEditors.set(view, { owner: component, path: def.path, save });
       reposition();
       const len = view.state.doc.length;
       view.dispatch({
@@ -704,7 +753,11 @@ export default class NutshellPlugin extends Plugin {
         });
       }
     };
-    component.register(closeEditor); // flush pending edits when the card closes
+    component.register(() => {
+      // Flush pending edits when the card closes.
+      closed = true;
+      closeEditor();
+    });
 
     // Toolbar row: expand/collapse.
     const toolbar = overlay.createDiv({ cls: "nutshell-toolbar" });
@@ -837,7 +890,8 @@ export default class NutshellPlugin extends Plugin {
    */
   private openLink(href: string, sourcePath: string, newLeaf: PaneType | boolean) {
     if (EXTERNAL_LINK_RE.test(href)) {
-      window.open(href);
+      if (OPENABLE_URL_RE.test(href)) window.open(href);
+      else new Notice(`Nutshell: cards don't open "${href.split(":")[0]}:" links.`);
       return;
     }
     if (!newLeaf) this.closeAll();
@@ -906,15 +960,16 @@ export default class NutshellPlugin extends Plugin {
     const text =
       this.editorFor(file)?.getValue() ??
       (await this.app.vault.cachedRead(file));
-    if (!subpath) return { markdown: text, file, want: null };
+    if (!subpath) return { markdown: text, file, want: null, ambiguous: false };
 
     const want = normalizeHeading(subpath.replace(/^#+/, ""));
     const section = findSection(text, want);
     if (!section) return null;
     return {
-      markdown: text.slice(section.from, section.to).trim(),
+      markdown: trimBlankLines(text.slice(section.from, section.to)),
       file,
       want,
+      ambiguous: section.ambiguous,
     };
   }
 
@@ -924,14 +979,17 @@ export default class NutshellPlugin extends Plugin {
     return async () => {
       const resolved = await this.resolveTarget(rawTarget, sourcePath);
       if (!resolved) return `⚠️ Nutshell: couldn't resolve "${rawTarget}".`;
-      const { file, want } = resolved;
+      const { file, want, ambiguous } = resolved;
+      if (ambiguous) {
+        new Notice(`Nutshell: "${want}" names more than one heading in ${file.basename}, so its card is read-only.`);
+      }
       return {
         markdown: resolved.markdown,
         path: file.path,
         save:
-          want === null
+          want === null || ambiguous
             ? null
-            : (body) => void this.writeDefinition(file, want, body),
+            : (body) => this.writeDefinition(file, want, body),
       };
     };
   }
@@ -948,21 +1006,21 @@ export default class NutshellPlugin extends Plugin {
         (t) => t.target === null && t.from <= at && at < t.to,
       );
       if (!term) return "⚠️ Nutshell: couldn't find this term in the note.";
-      return this.inlineDefinition(file, file.path, term);
+      return this.inlineDefinition(file, file.path, term, termRef(text, term));
     };
   }
 
-  /** Card content for an inline term; edits rewrite the term in `file`. */
+  /** Card content for an inline term; edits rewrite the term `ref` points to in `file`. */
   private inlineDefinition(
     file: TFile | null,
     path: string,
     term: Term,
+    ref: TermRef,
   ): Definition {
-    const ref = { raw: term.raw, at: term.from };
     return {
       markdown: term.definition,
       path,
-      save: file && ((body) => void this.writeInline(file, term.label, ref, body)),
+      save: file && ((body) => this.writeInline(file, term.label, ref, body)),
     };
   }
 
@@ -1003,20 +1061,18 @@ export default class NutshellPlugin extends Plugin {
   }
 
   /** Rewrite an inline term with a new definition. */
-  private async writeInline(
-    file: TFile,
-    label: string,
-    ref: { raw: string; at: number },
-    body: string,
-  ) {
+  private async writeInline(file: TFile, label: string, ref: TermRef, body: string) {
     const next = inlineTerm(label, body);
-    const hit = await this.spliceNote(file, next, (text) => findTerm(text, ref));
-    if (!hit) {
-      new Notice(`Nutshell: couldn't find "${label}" in the note to save.`);
-      return;
-    }
-    ref.raw = next;
-    ref.at = hit.from;
+    // Where the term was found; `ref` moves only once the write succeeded, so
+    // a failed write can be retried against the unchanged note.
+    let found = null as { text: string; at: number } | null;
+    const hit = await this.spliceNote(file, next, (text) => {
+      const t = findTerm(text, ref);
+      found = t && { text, at: t.from };
+      return t;
+    });
+    if (!hit || !found) throw new Error(`couldn't find "${label}" in the note`);
+    moveRef(ref, found.text, found.at, next);
   }
 
   /**
@@ -1071,22 +1127,25 @@ export default class NutshellPlugin extends Plugin {
    */
   private cardTermLoader(view: EditorView, at: number, path: string): DefinitionLoader {
     return async () => {
-      const hit = parseTerms(view.state.doc.toString()).find(
-        (t) => t.target === null && t.from <= at && at < t.to,
-      );
+      const text = view.state.doc.toString();
+      const hit = parseTerms(text).find((t) => t.target === null && t.from <= at && at < t.to);
       if (!hit) return "⚠️ Nutshell: couldn't find this term.";
-      const ref = { raw: hit.raw, at: hit.from };
+      const ref = termRef(text, hit);
       return {
         markdown: hit.definition,
         path,
-        save: (body) => {
-          if (!view.dom.isConnected) return; // outer editor already closed
-          const current = findTerm(view.state.doc.toString(), ref);
-          if (!current) return;
+        // Written into the outer card's editor, then that card writes it to
+        // the note: done only when that is.
+        save: async (body) => {
+          const outer = this.cardEditors.get(view);
+          if (!outer || !view.dom.isConnected) throw new Error("the outer card closed");
+          const current = view.state.doc.toString();
+          const term = findTerm(current, ref);
+          if (!term) throw new Error(`couldn't find "${hit.label}" in the outer definition`);
           const next = inlineTerm(hit.label, body);
-          view.dispatch({ changes: { from: current.from, to: current.to, insert: next } });
-          ref.raw = next;
-          ref.at = current.from;
+          moveRef(ref, current, term.from, next);
+          view.dispatch({ changes: { from: term.from, to: term.to, insert: next } });
+          await outer.save();
         },
       };
     };
@@ -1094,14 +1153,11 @@ export default class NutshellPlugin extends Plugin {
 
   /** Replace the body of heading definition `want` in `file`. */
   private async writeDefinition(file: TFile, want: string, body: string) {
-    const hit = await this.spliceNote(
-      file,
-      body ? `\n\n${body}\n` : "\n",
-      (text) => findSection(text, want),
-    );
-    if (!hit) {
-      new Notice(`Nutshell: couldn't find the "${want}" definition to save.`);
-    }
+    const hit = await this.spliceNote(file, body ? `\n\n${body}\n` : "\n", (text) => {
+      const section = findSection(text, want);
+      return section && !section.ambiguous ? section : null;
+    });
+    if (!hit) throw new Error(`couldn't find a single "${want}" heading in ${file.basename}`);
   }
 
   /**
@@ -1162,8 +1218,8 @@ export default class NutshellPlugin extends Plugin {
     const headings = this.app.metadataCache.getFileCache(af)?.headings ?? [];
 
     // A block is hidden when it falls inside a `:` heading's section: from that
-    // heading until the next heading of equal-or-higher level (the same rule
-    // resolveTarget uses to slice popup content), so sub-headings hide too.
+    // heading until the next heading of equal-or-higher level (as findSection
+    // ends a section), so sub-headings hide too.
     let hider: HeadingCache | null = null;
     for (const h of headings) {
       if (h.position.start.line > info.lineStart) break;

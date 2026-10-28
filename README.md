@@ -15,7 +15,7 @@ nutshell lets you explore rabbit holes without crowding out the noise of your ma
 - Cards are rendered by Obsidian itself, so math, images, links and formatting all work.
 - Terms can sit inside cards, and cards open on top of each other. Closing a card closes the cards opened from it.
 - Works in reading view and Live Preview. Source mode shows the raw markdown.
-- You can edit a definition from its card with the pencil button.
+- Click a card's text to edit the definition. Edits save back into the note as you type.
 - Keyboard: `Enter`/`Space` on a focused term opens it, and `Esc` closes the top card.
 
 ## Usage
@@ -49,12 +49,28 @@ A probability distribution on [0, 1], shaped by two parameters α and β.
 
 Without the plugin, these are ordinary heading links, so your notes still read fine anywhere else.
 
+### Editing in a card
+
+Click the text of an open card to edit it, at the spot you clicked. Changes are written back into the note as you type: an inline term's comment, or the heading's section.
+
+Some cards are read-only:
+
+- A card for a whole note (a link with no `#heading`).
+- A heading term whose name matches more than one heading of the same kind. If a hidden `## :Beta` and a visible `## Beta` both exist, `[:beta](<#Beta>)` opens the hidden one.
+- An inline term whose label shows up a different number of times in the rendered section (or card) than in its markdown, so Nutshell can't tell which one you clicked.
+
+If a save fails, Nutshell says so and keeps your text in the card. A save fails when the file can't be written, when the term was changed elsewhere, or when the term has an identical twin (same label and definition) and the note changed above it since the card opened, because Nutshell can no longer tell the two apart. Reopen the card to edit it again. If the card was already closed, Nutshell tries to copy the text to the clipboard, and its notice says whether that worked.
+
+Links in a card open in Obsidian. `http` and `https` links open in your browser, and `mailto` and `obsidian` links open in the app that handles them. Other schemes are not opened.
+
 ### Known limitations
 
 - Hidden `:` headings still appear in the Outline pane.
 - Block references (`#^block`) aren't supported as targets.
 
 ## Installing
+
+Requires Obsidian 1.5.7 or later.
 
 **From Community Plugins:** open **Settings → Community plugins → Browse**, search for "Nutshell", then install and enable it.
 
@@ -85,10 +101,11 @@ Code layout:
 | File | Responsibility |
 |---|---|
 | `terms.ts` | Term syntax: parsing and writing `[:label]` terms |
-| `main.ts` | Plugin entry, reading view, popup cards, heading resolution |
+| `sections.ts` | Heading definitions: finding the section a link term opens |
+| `main.ts` | Plugin entry, reading view, popup cards, saving |
 | `livePreview.ts` | Live Preview decorations |
 | `cardEditor.ts` | The editor inside a card |
-| `styles.css` | Styles, using only Obsidian theme variables |
+| `styles.css` | Styles: Obsidian theme colors and fonts, with plugin-defined layout sizes |
 
 ## Credits
 
