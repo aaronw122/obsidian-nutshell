@@ -72,11 +72,17 @@ export function parseTerms(text: string, base = 0): Term[] {
   return terms;
 }
 
+/** A `[:label]` that shows in rendered text: a term, or an escaped `\[:label]` literal. */
+export interface ShownTerm extends Term {
+  escaped: boolean; // `\[:label]`: shows as text, but isn't a term
+}
+
 /**
- * The terms of `text` that render as terms: not inside code or math, where
- * `[:label]` is literal text.
+ * Every `[:label]` of `text` that shows as `[:label]` in rendered text, in
+ * order: terms and escaped literals, but not code or math, which render
+ * differently.
  */
-export function renderedTerms(text: string, base = 0): Term[] {
+export function shownTerms(text: string, base = 0): ShownTerm[] {
   const code = blankCode(text);
   const terms = parseTerms(text).filter((t) => code[t.from] === "[");
   // Math is found with the surviving terms blanked, so a `$` inside a hidden
@@ -94,7 +100,19 @@ export function renderedTerms(text: string, base = 0): Term[] {
   }
   return terms
     .filter((t) => !math.some((r) => r.from <= t.from && t.from < r.to))
-    .map((t) => ({ ...t, from: t.from + base, to: t.to + base }));
+    .map((t) => ({
+      ...t,
+      from: t.from + base,
+      to: t.to + base,
+      escaped: escapedAt(text, t.from),
+    }));
+}
+
+/** Whether the character at `i` is escaped: an odd number of backslashes before it. */
+function escapedAt(text: string, i: number): boolean {
+  let n = 0;
+  while (i - n - 1 >= 0 && text[i - n - 1] === "\\") n++;
+  return n % 2 === 1;
 }
 
 /** Markdown for an inline term; an empty definition gives a bare `[:label]`. */
@@ -104,15 +122,36 @@ export function inlineTerm(label: string, definition: string): string {
 }
 
 /**
- * The term whose markdown is `ref.raw`, found again in `text`: the one still
- * at offset `ref.at`, else the only one with that markdown. Null when it is
- * gone or ambiguous (identical terms that moved): better no write than a write
- * to the wrong term.
+ * Where an inline term was: its markdown, its offset, and the text before it
+ * (which tells two identical terms apart once the text has changed).
  */
-export function findTerm(
-  text: string,
-  ref: { raw: string; at: number },
-): Term | null {
+export interface TermRef {
+  raw: string;
+  at: number;
+  before: string;
+}
+
+/** A reference to `term`, which was parsed from `text`. */
+export function termRef(text: string, term: Term): TermRef {
+  return { raw: term.raw, at: term.from, before: text.slice(0, term.from) };
+}
+
+/**
+ * The term `ref` points to, found again in `text`: the only one with its
+ * markdown, or the one still at its offset with unchanged text before it. Null
+ * when it is gone or when an identical term could have taken its place: better
+ * no write than a write to the wrong term.
+ */
+export function findTerm(text: string, ref: TermRef): Term | null {
   const same = parseTerms(text).filter((t) => t.raw === ref.raw);
-  return same.find((t) => t.from === ref.at) ?? (same.length === 1 ? same[0] : null);
+  if (same.length === 1) return same[0];
+  const t = same.find((s) => s.from === ref.at);
+  return t && text.slice(0, ref.at) === ref.before ? t : null;
+}
+
+/** Point `ref` at `raw`, just written at offset `at` of `text` (the text before the write). */
+export function moveRef(ref: TermRef, text: string, at: number, raw: string) {
+  ref.raw = raw;
+  ref.at = at;
+  ref.before = text.slice(0, at);
 }

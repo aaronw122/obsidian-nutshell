@@ -57,11 +57,11 @@ Some cards are read-only:
 
 - A card for a whole note (a link with no `#heading`).
 - A heading term whose name matches more than one heading of the same kind. If a hidden `## :Beta` and a visible `## Beta` both exist, `[:beta](<#Beta>)` opens the hidden one.
-- An inline term when its label appears both as a real term and as literal text the plugin can't tell apart from it (for example, inside a link's text).
+- An inline term whose label shows up in the rendered note a different number of times than in its markdown (for example, also as literal text inside a link), so Nutshell can't tell which one you clicked.
 
-If a save fails (the term was edited elsewhere, or the file couldn't be written), Nutshell says so and keeps your text in the card. If the card was already closed, the text is copied to the clipboard.
+If a save fails, Nutshell says so and keeps your text in the card. A save fails when the file can't be written, when the term was changed elsewhere, or when the term has an identical twin (same label and definition) and the note changed above it since the card opened, because Nutshell can no longer tell the two apart. Reopen the card to edit it again. If the card was already closed, Nutshell tries to copy the text to the clipboard, and its notice says whether that worked.
 
-Links in a card open in Obsidian, or in your browser for `http`, `https`, `mailto` and `obsidian` URLs. Other schemes are not opened.
+Links in a card open in Obsidian. `http` and `https` links open in your browser, and `mailto` and `obsidian` links open in the app that handles them. Other schemes are not opened.
 
 ### Known limitations
 

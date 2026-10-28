@@ -20,7 +20,7 @@ import {
 import { EXTERNAL_LINK_RE, createCardEditor } from "./cardEditor";
 import { nutshellLivePreview } from "./livePreview";
 import { END_MARKER_RE, findSection, normalizeHeading } from "./sections";
-import { Term, findTerm, inlineTerm, parseTerms, renderedTerms, trimBlankLines } from "./terms";
+import { Term, TermRef, findTerm, inlineTerm, moveRef, parseTerms, shownTerms, termRef, trimBlankLines } from "./terms";
 
 /**
  * Nutshell for Obsidian
@@ -65,10 +65,14 @@ type DefinitionLoader = () => Promise<Definition | string>;
 
 /** Markdown behind rendered content, used to find inline definitions. */
 interface InlineSource {
-  text: string;
-  offset: number; // where `text` starts in the note; a hint for finding a term again
+  text: string; // the whole note (or definition) the content was rendered from
+  from: number; // the rendered part of `text`
+  to: number;
   file: TFile | null; // note that edits are written to; null = read-only
 }
+
+/** A save failure the card has already told the user about. */
+class ReportedError extends Error {}
 
 interface PopupOptions {
   anchor?: () => { left: number; right: number; top: number; bottom: number } | null; // term position when there is no trigger (null: not rendered)
@@ -217,8 +221,11 @@ function canRenderCodeBlock(language: string): boolean {
 
 export default class NutshellPlugin extends Plugin {
   private openPopups: ActivePopup[] = [];
-  /** Card editors → the card they belong to (for creating terms inside them). */
-  private cardEditors = new WeakMap<EditorView, { owner: Component; path: string }>();
+  /** Card editors → the card they belong to (for creating terms inside them, and saving through it). */
+  private cardEditors = new WeakMap<
+    EditorView,
+    { owner: Component; path: string; save: () => Promise<void> }
+  >();
   /** Windows that already have the card handling (see watchWindow). */
   private watchedWindows = new WeakSet<Window>();
 
@@ -356,8 +363,10 @@ export default class NutshellPlugin extends Plugin {
     });
 
     if (!source) return;
-    const terms = renderedTerms(source.text, source.offset).filter((t) => t.target === null);
-    if (terms.length === 0) return;
+    const shown = shownTerms(source.text.slice(source.from, source.to), source.from).filter(
+      (t) => t.target === null,
+    );
+    if (shown.length === 0) return;
     const nodes: Text[] = [];
     const walker = rootEl.doc.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
@@ -377,23 +386,25 @@ export default class NutshellPlugin extends Plugin {
       }
       return hits;
     });
-    // Rendered terms pair with source terms of the same label, in order. When
-    // a label shows up a different number of times in each, the pairing is a
-    // guess: those cards open read-only rather than risk editing the wrong term.
+    // Each rendered `[:label]` pairs with the next source `[:label]` that shows
+    // as that text (a term, or an escaped literal, which stays text). When a
+    // label shows a different number of times in each, the pairing is a guess:
+    // its cards open read-only rather than risk editing the wrong term.
     const tally = (labels: string[]) => {
       const counts = new Map<string, number>();
       for (const l of labels) counts.set(l, (counts.get(l) ?? 0) + 1);
       return counts;
     };
-    const inSource = tally(terms.map((t) => t.label));
+    const inSource = tally(shown.map((t) => t.label));
     const inRendered = tally(found.flat().map((h) => h.label));
     nodes.forEach((node, k) => {
       const parts: (string | HTMLElement)[] = [];
       let last = 0;
       for (const { at, end, label } of found[k]) {
-        const i = terms.findIndex((t) => t.label === label);
+        const i = shown.findIndex((t) => t.label === label);
         if (i < 0) continue;
-        const term = terms.splice(i, 1)[0];
+        const term = shown.splice(i, 1)[0];
+        if (term.escaped) continue;
         const sure = inSource.get(label) === inRendered.get(label);
         const trigger = this.makeTrigger(label, owner, () =>
           this.togglePopup(trigger, cardOwner, async () => {
@@ -401,7 +412,12 @@ export default class NutshellPlugin extends Plugin {
               const def = define(term);
               return sure ? def : { ...def, save: null };
             }
-            return this.inlineDefinition(sure ? source.file : null, source.file?.path ?? sourcePath, term);
+            return this.inlineDefinition(
+              sure ? source.file : null,
+              source.file?.path ?? sourcePath,
+              term,
+              termRef(source.text, term),
+            );
           }),
         );
         parts.push(node.data.slice(last, at), trigger);
@@ -443,13 +459,17 @@ export default class NutshellPlugin extends Plugin {
     if (!el.textContent?.includes("[:")) return null;
     const info = ctx.getSectionInfo(el);
     if (!info) return null;
+    // Offsets of the section's first and last line in the whole note.
     const lines = info.text.split("\n");
+    let from = 0;
+    for (let i = 0; i < info.lineStart; i++) from += lines[i].length + 1;
+    let to = from;
+    for (let i = info.lineStart; i <= info.lineEnd && i < lines.length; i++) to += lines[i].length + 1;
     const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
     return {
-      text: lines.slice(info.lineStart, info.lineEnd + 1).join("\n"),
-      offset: lines
-        .slice(0, info.lineStart)
-        .reduce((n, line) => n + line.length + 1, 0),
+      text: info.text,
+      from,
+      to: Math.min(to, info.text.length),
       file: file instanceof TFile ? file : null,
     };
   }
@@ -563,15 +583,16 @@ export default class NutshellPlugin extends Plugin {
     let body = def.markdown; // the card's text, written to the note or not
     let saved = body; // the text last written to the note
     let writing: Promise<void> = Promise.resolve();
-    let failing = false; // the last write failed (warned once until one succeeds)
+    let failing = false; // the last write failed (an open card warns once until one succeeds)
     let closed = false;
     let rendered: Component | null = null; // current render tree; owns nested cards
     let editor: EditorView | null = null;
     let saveTimer: number | null = null;
 
-    const flush = () => {
-      if (!persist) return;
-      writing = writing.then(async () => {
+    /** Write `body` after any write in progress; rejects (with a ReportedError) when it fails. */
+    const flush = (): Promise<void> => {
+      if (!persist) return Promise.resolve();
+      const write = writing.then(async () => {
         const next = body;
         if (next === saved) return;
         try {
@@ -579,36 +600,47 @@ export default class NutshellPlugin extends Plugin {
           saved = next;
           failing = false;
         } catch (e) {
+          const reported = failing;
+          failing = true;
+          // A nested card's failed write was reported by the card it writes into.
+          if (e instanceof ReportedError) throw e;
           const why = e instanceof Error ? e.message : String(e);
           if (closed) {
-            // The card is gone with the only copy of the text: hand it over.
-            const copied = await navigator.clipboard.writeText(next).then(
-              () => true,
-              () => false,
-            );
+            // The card is gone with the only copy of the text: try to hand it over.
+            let copied = false;
+            try {
+              await navigator.clipboard.writeText(next);
+              copied = true;
+            } catch {
+              /* reported below */
+            }
             new Notice(
               copied
                 ? `Nutshell: couldn't save the definition (${why}). It was copied to the clipboard.`
-                : `Nutshell: couldn't save the definition (${why}), or copy it to the clipboard.`,
+                : `Nutshell: couldn't save the definition (${why}), or copy it to the clipboard. It is lost.`,
               0, // stays until dismissed
             );
-          } else if (!failing) {
+          } else if (!reported) {
             new Notice(
               `Nutshell: couldn't save the definition (${why}). Your text stays in the card and is saved again on the next edit.`,
             );
           }
-          failing = true;
+          throw new ReportedError(why);
         }
       });
+      writing = write.catch(() => {}); // the next write runs either way
+      return write;
     };
+    /** Take the editor's text and write it now. */
     const save = () => {
       if (saveTimer !== null) window.clearTimeout(saveTimer);
       saveTimer = null;
       if (editor) body = trimBlankLines(editor.state.doc.toString());
-      flush();
+      return flush();
     };
+    const ignore = () => {}; // failures are already reported
     const closeEditor = () => {
-      save();
+      void save().catch(ignore);
       editor?.destroy();
       editor = null;
     };
@@ -632,21 +664,22 @@ export default class NutshellPlugin extends Plugin {
         rendered,
         rendered,
         def.path,
-        { text: body, offset: 0, file: null },
+        { text: body, from: 0, to: body.length, file: null },
         persist
           ? (term) => {
-              const ref = { raw: term.raw, at: term.from };
+              const ref = termRef(body, term);
               return {
                 markdown: term.definition,
                 path: def.path,
+                // Written into this card's text, then this card writes it to
+                // the note: done only when that is.
                 save: async (nested) => {
                   const cur = findTerm(body, ref);
                   if (!cur) throw new Error(`couldn't find "${term.label}" in the outer definition`);
                   const next = inlineTerm(term.label, nested);
+                  moveRef(ref, body, cur.from, next);
                   body = body.slice(0, cur.from) + next + body.slice(cur.to);
-                  ref.raw = next;
-                  ref.at = cur.from;
-                  flush(); // the outer card reports its own write failures
+                  await flush();
                 },
               };
             }
@@ -669,7 +702,7 @@ export default class NutshellPlugin extends Plugin {
       const view = createCardEditor(content, body, {
         onChange: () => {
           if (saveTimer !== null) window.clearTimeout(saveTimer);
-          saveTimer = window.setTimeout(save, SAVE_DELAY_MS);
+          saveTimer = window.setTimeout(() => void save().catch(ignore), SAVE_DELAY_MS);
         },
         resolveImage: (target) => this.imageUrl(target, def.path),
         saveImage: (image, dropped) => this.saveImage(image, dropped, def.path),
@@ -694,7 +727,7 @@ export default class NutshellPlugin extends Plugin {
         },
       });
       editor = view;
-      this.cardEditors.set(view, { owner: component, path: def.path });
+      this.cardEditors.set(view, { owner: component, path: def.path, save });
       reposition();
       const len = view.state.doc.length;
       view.dispatch({
@@ -966,17 +999,17 @@ export default class NutshellPlugin extends Plugin {
         (t) => t.target === null && t.from <= at && at < t.to,
       );
       if (!term) return "⚠️ Nutshell: couldn't find this term in the note.";
-      return this.inlineDefinition(file, file.path, term);
+      return this.inlineDefinition(file, file.path, term, termRef(text, term));
     };
   }
 
-  /** Card content for an inline term; edits rewrite the term in `file`. */
+  /** Card content for an inline term; edits rewrite the term `ref` points to in `file`. */
   private inlineDefinition(
     file: TFile | null,
     path: string,
     term: Term,
+    ref: TermRef,
   ): Definition {
-    const ref = { raw: term.raw, at: term.from };
     return {
       markdown: term.definition,
       path,
@@ -1021,17 +1054,14 @@ export default class NutshellPlugin extends Plugin {
   }
 
   /** Rewrite an inline term with a new definition. */
-  private async writeInline(
-    file: TFile,
-    label: string,
-    ref: { raw: string; at: number },
-    body: string,
-  ) {
+  private async writeInline(file: TFile, label: string, ref: TermRef, body: string) {
     const next = inlineTerm(label, body);
-    const hit = await this.spliceNote(file, next, (text) => findTerm(text, ref));
+    const hit = await this.spliceNote(file, next, (text) => {
+      const t = findTerm(text, ref);
+      if (t) moveRef(ref, text, t.from, next);
+      return t;
+    });
     if (!hit) throw new Error(`couldn't find "${label}" in the note`);
-    ref.raw = next;
-    ref.at = hit.from;
   }
 
   /**
@@ -1086,22 +1116,25 @@ export default class NutshellPlugin extends Plugin {
    */
   private cardTermLoader(view: EditorView, at: number, path: string): DefinitionLoader {
     return async () => {
-      const hit = parseTerms(view.state.doc.toString()).find(
-        (t) => t.target === null && t.from <= at && at < t.to,
-      );
+      const text = view.state.doc.toString();
+      const hit = parseTerms(text).find((t) => t.target === null && t.from <= at && at < t.to);
       if (!hit) return "⚠️ Nutshell: couldn't find this term.";
-      const ref = { raw: hit.raw, at: hit.from };
+      const ref = termRef(text, hit);
       return {
         markdown: hit.definition,
         path,
+        // Written into the outer card's editor, then that card writes it to
+        // the note: done only when that is.
         save: async (body) => {
-          if (!view.dom.isConnected) throw new Error("the outer card closed");
-          const current = findTerm(view.state.doc.toString(), ref);
-          if (!current) throw new Error(`couldn't find "${hit.label}" in the outer definition`);
+          const outer = this.cardEditors.get(view);
+          if (!outer || !view.dom.isConnected) throw new Error("the outer card closed");
+          const current = view.state.doc.toString();
+          const term = findTerm(current, ref);
+          if (!term) throw new Error(`couldn't find "${hit.label}" in the outer definition`);
           const next = inlineTerm(hit.label, body);
-          view.dispatch({ changes: { from: current.from, to: current.to, insert: next } });
-          ref.raw = next;
-          ref.at = current.from;
+          moveRef(ref, current, term.from, next);
+          view.dispatch({ changes: { from: term.from, to: term.to, insert: next } });
+          await outer.save();
         },
       };
     };
@@ -1174,8 +1207,8 @@ export default class NutshellPlugin extends Plugin {
     const headings = this.app.metadataCache.getFileCache(af)?.headings ?? [];
 
     // A block is hidden when it falls inside a `:` heading's section: from that
-    // heading until the next heading of equal-or-higher level (the same rule
-    // resolveTarget uses to slice popup content), so sub-headings hide too.
+    // heading until the next heading of equal-or-higher level (as findSection
+    // ends a section), so sub-headings hide too.
     let hider: HeadingCache | null = null;
     for (const h of headings) {
       if (h.position.start.line > info.lineStart) break;
