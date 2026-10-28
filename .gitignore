@@ -1,0 +1,9 @@
+node_modules/
+main.js
+.hotreload
+.DS_Store
+
+# Local dev notes, not published
+PLAN.md
+notes/
+conversations/

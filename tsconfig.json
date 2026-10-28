@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "module": "ESNext",
+    "target": "ES2018",
+    "moduleResolution": "node",
+    "lib": ["DOM", "ES2018"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noImplicitAny": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["*.ts"]
+}

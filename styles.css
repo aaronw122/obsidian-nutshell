@@ -1,0 +1,292 @@
+/* Trigger: the inline :term the reader clicks */
+.nutshell-trigger {
+  color: var(--link-color, var(--text-accent));
+  border-bottom: 1px dashed var(--link-color, var(--text-accent));
+  cursor: pointer;
+}
+/* Rendered text in an editable card: clicking it switches to editing. */
+.nutshell-popup.is-editable .nutshell-popup-content {
+  cursor: text;
+}
+.nutshell-trigger:hover {
+  background: var(--text-selection);
+}
+.nutshell-trigger.is-open {
+  background: var(--text-selection);
+  border-bottom-style: solid;
+}
+.nutshell-trigger::after {
+  content: "›";
+  display: inline-block;
+  margin-left: 0.15em;
+  font-size: 0.85em;
+  opacity: 0.6;
+  transform: rotate(90deg);
+}
+
+/* Floating popup card */
+.nutshell-popup {
+  position: fixed;
+  z-index: var(--layer-popover, 30);
+  /* Same width for every card, scaled to the window. */
+  width: clamp(320px, 40vw, 640px);
+  box-sizing: border-box;
+  max-height: 50vh;
+  overflow: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s, 0 4px 16px rgba(0, 0, 0, 0.25));
+  /* Card padding as variables so the toolbar can span it (see below). The
+     top padding lives in the toolbar, not the card. */
+  --nutshell-pad-top: 0.2em;
+  --nutshell-pad-x: 0.9em;
+  --nutshell-bar-inset: 0.4em;
+  padding: 0 var(--nutshell-pad-x) 0.4em;
+  font-size: var(--font-text-size, 1rem);
+  animation: nutshell-pop-in 90ms ease-out;
+}
+
+@keyframes nutshell-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* View and edit share one layout so switching between them doesn't shift the
+   text: same font and line height, and exactly one line between blocks (what a
+   blank line takes in the editor). Headings stay text-sized (just bold). Lists
+   keep a hanging indent, so wrapped lines line up under the item's text. */
+.nutshell-popup-content {
+  font-family: var(--font-text);
+  line-height: var(--line-height-normal);
+}
+.nutshell-popup-content :is(p, h1, h2, h3, h4, h5, h6, ul, ol, li, blockquote, pre, table) {
+  margin-block: 0;
+}
+/* Must outrank the margin reset above (0,1,1), or paragraphs lose the gap. */
+.nutshell-popup-content > :nth-child(n + 2) {
+  margin-top: 1lh;
+}
+.nutshell-popup-content :is(h1, h2, h3, h4, h5, h6) {
+  font-size: 1em;
+  line-height: inherit;
+}
+.nutshell-popup-content :is(ul, ol) {
+  padding-inline-start: 1.6em;
+}
+
+.nutshell-error {
+  color: var(--text-error);
+  font-size: 0.9em;
+}
+
+/* Toolbar row at the top (expand icon at the right); the text starts below it.
+   It sticks to the card's top edge but has no background, so it blends in:
+   scrolled content passes underneath and only the icon floats over it. The
+   row is click-through (except the icon) so text under it stays clickable.
+   The card's top padding is inside it, because a sticky element stops at its
+   scroll container's padding. */
+.nutshell-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 calc(-1 * var(--nutshell-pad-x));
+  padding: calc(var(--nutshell-pad-top) + 0.05em) var(--nutshell-bar-inset) 0;
+  pointer-events: none;
+}
+/* Cards without a toolbar (errors) still need the top padding. */
+.nutshell-popup-content:first-child {
+  padding-top: var(--nutshell-pad-top);
+}
+/* A small patch of card colour behind the icon keeps it readable over images. */
+.nutshell-toolbar .clickable-icon {
+  padding: 2px;
+  pointer-events: auto;
+  background: color-mix(in srgb, var(--background-primary) 80%, transparent);
+  border-radius: var(--radius-s, 4px);
+}
+.nutshell-toolbar svg {
+  width: calc(var(--icon-size, 18px) * 0.7);
+  height: calc(var(--icon-size, 18px) * 0.7);
+}
+
+/* Expanded: a large panel centered in the window instead of a card under the
+   term, laid out like a note: page padding and the readable line width
+   (Minimal's --line-width, else Obsidian's --file-line-width), centered. */
+.nutshell-popup.is-expanded {
+  top: 5vh;
+  left: 0;
+  right: 0;
+  margin-inline: auto;
+  width: min(1100px, 92vw);
+  max-width: none;
+  height: 90vh;
+  max-height: 90vh;
+  --nutshell-pad-top: var(--size-4-4, 16px);
+  --nutshell-pad-x: var(--size-4-8, 32px);
+  --nutshell-bar-inset: var(--size-4-3, 12px);
+  padding: 0 var(--nutshell-pad-x) var(--size-4-8, 32px);
+}
+.nutshell-popup.is-expanded .nutshell-popup-content {
+  max-width: var(--line-width, var(--file-line-width, 700px));
+  margin-inline: auto;
+}
+
+/* The term is scrolled out of view: hide the card until it comes back. */
+.nutshell-popup.is-offscreen {
+  visibility: hidden;
+}
+/* The card editor (CodeMirror) looks like the card's text, just unrendered:
+   same font and line height, no box, border, padding or focus ring. It grows
+   with its content; the card itself scrolls. */
+.nutshell-popup .nutshell-editor {
+  min-height: 1lh;
+  font-family: var(--font-text);
+  font-size: inherit;
+  line-height: var(--line-height-normal);
+  color: var(--text-normal);
+  background: transparent;
+}
+.nutshell-popup .nutshell-editor.cm-focused {
+  outline: none;
+}
+.nutshell-popup .nutshell-editor .cm-scroller {
+  font-family: inherit;
+  line-height: inherit;
+  overflow: visible;
+}
+.nutshell-popup .nutshell-editor .cm-content {
+  padding: 0;
+  caret-color: var(--text-normal);
+}
+.nutshell-popup .nutshell-editor .cm-line {
+  padding: 0;
+}
+.nutshell-popup .nutshell-editor .cm-placeholder {
+  color: var(--text-faint);
+}
+.nutshell-popup.is-expanded .nutshell-editor {
+  min-height: calc(90vh - 4em);
+}
+/* Hidden span used to measure list markers in the editor's own font. */
+.nutshell-popup .nutshell-measure {
+  position: absolute;
+  visibility: hidden;
+  white-space: pre;
+  pointer-events: none;
+}
+/* Bold, italic and links while editing, styled like Obsidian's editor; the
+   markdown markers show faintly when the cursor is on them. */
+.nutshell-popup .nutshell-md-strong {
+  font-weight: var(--bold-weight, 600);
+}
+.nutshell-popup .nutshell-md-em {
+  font-style: italic;
+}
+.nutshell-popup .nutshell-md-link {
+  color: var(--link-color);
+  text-decoration: var(--link-decoration, underline);
+}
+.nutshell-popup .nutshell-md-link.is-external {
+  color: var(--link-external-color, var(--link-color));
+}
+.nutshell-popup .nutshell-md-link[data-href] {
+  cursor: var(--cursor-link, pointer);
+}
+.nutshell-popup .nutshell-md-formatting {
+  color: var(--text-faint);
+}
+/* A plugin code block (```wave…) drawn as its output while editing, with a
+   `</>` button (shown on hover) to edit its source, as in Obsidian's editor. */
+.nutshell-popup .nutshell-editor-block {
+  position: relative;
+  cursor: default;
+}
+/* The plugin's output gets its own stacking context, so its sticky or
+   positioned parts (wave-plot's slider bar) can't paint over the button. */
+.nutshell-popup .nutshell-editor-block > :first-child {
+  isolation: isolate;
+}
+.nutshell-popup .nutshell-editor-block-edit {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  opacity: 0;
+  transition: opacity 100ms;
+}
+.nutshell-popup .nutshell-editor-block:hover .nutshell-editor-block-edit {
+  opacity: 1;
+}
+/* The live output of the block whose source is being edited, pinned to the
+   card's bottom edge so it stays in view while the source scrolls above it. */
+.nutshell-popup .nutshell-block-preview {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  max-height: 25vh;
+  overflow: auto;
+  background: var(--background-primary);
+  border-top: 1px dashed var(--background-modifier-border);
+  padding-top: 0.4em;
+}
+.nutshell-popup.is-expanded .nutshell-block-preview {
+  max-height: 45vh;
+}
+/* Math rendered in place of `$…$` / `$$…$$` while editing; display math gets
+   its own centred line, as in Obsidian's editor. */
+.nutshell-popup .nutshell-editor-math {
+  cursor: text;
+}
+.nutshell-popup .nutshell-editor-math.is-display {
+  display: block;
+  text-align: center;
+}
+/* Images drawn in place of `![[…]]` while editing, with a corner handle
+   (shown on hover) to drag-resize them. */
+.nutshell-popup .nutshell-editor-image {
+  display: block;
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  line-height: 0;
+}
+.nutshell-popup .nutshell-editor-image img {
+  display: block;
+  max-width: 100%;
+}
+.nutshell-popup .nutshell-image-handle {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--interactive-accent);
+  border: 1px solid var(--background-primary);
+  cursor: nwse-resize;
+  opacity: 0;
+  transition: opacity 100ms;
+}
+.nutshell-popup .nutshell-editor-image:hover .nutshell-image-handle {
+  opacity: 0.9;
+}
+.nutshell-empty {
+  color: var(--text-faint);
+  font-style: italic;
+  font-size: 0.9em;
+}
+
+/* Hidden `:`-prefixed definition sections (reading-mode body only) */
+.nutshell-hidden-def {
+  display: none !important;
+}
