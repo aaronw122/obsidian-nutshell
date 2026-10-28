@@ -13,7 +13,7 @@
     "nutshell",
     "expandable"
   ],
-  "author": "Aaron Wills",
+  "author": "Aaron Williams",
   "license": "MIT",
   "devDependencies": {
     "@codemirror/commands": "^6.8.1",
