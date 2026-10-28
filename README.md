@@ -6,9 +6,8 @@ The name and the idea come from [Nicky Case](https://ncase.me)'s [Nutshell](http
 
 ## Why
 
-Notes often need a side explanation: a definition, a derivation, or background a reader may or may not need. Putting it inline clutters the note for readers who already know it. Putting it in a footnote or another note makes everyone else jump away and lose their place.
+nutshell lets you explore rabbit holes without crowding out the noise of your main writing thread. 
 
-Nutshell keeps the explanation one click away, in context. Readers who need it open it, and readers who don't never see it.
 
 ## What it does
 
