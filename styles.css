@@ -286,7 +286,8 @@
   font-size: 0.9em;
 }
 
-/* Hidden `:`-prefixed definition sections (reading-mode body only) */
-.nutshell-hidden-def {
-  display: none !important;
+/* Hidden `:`-prefixed definition sections (reading-mode body only). Scoped
+   to rendered markdown so it outranks a theme's plain display rules. */
+.markdown-rendered .nutshell-hidden-def {
+  display: none;
 }
