@@ -96,4 +96,4 @@ The name, the `:term` syntax, the hidden `:` heading convention, and the whole i
 
 ## License
 
-[MIT](LICENSE) © Aaron Wills
+[MIT](LICENSE) © Aaron Williams
