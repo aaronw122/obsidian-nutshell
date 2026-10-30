@@ -77,6 +77,19 @@ interface InlineSource {
  */
 class ReportedError extends Error {}
 
+/**
+ * An editable card's text, for the cards opened from terms in its editor:
+ * they store their definitions inside it. Usable after the card closes, so a
+ * nested card closing in the same click still gets its last edit saved.
+ */
+interface CardText {
+  owner: Component; // the card's component: nested cards close with it
+  path: string; // note the card's definition belongs to
+  text(): string; // the editor's text while it is open, else the card's last text
+  replace(from: number, to: number, insert: string): void; // offsets into text()
+  save(): Promise<void>; // write the card's text to the note now
+}
+
 interface PopupOptions {
   anchor?: () => { left: number; right: number; top: number; bottom: number } | null; // term position when there is no trigger (null: not rendered)
   column?: HTMLElement; // editor content element whose line width bounds the card when there is no trigger
@@ -224,11 +237,8 @@ function canRenderCodeBlock(language: string): boolean {
 
 export default class NutshellPlugin extends Plugin {
   private openPopups: ActivePopup[] = [];
-  /** Card editors → the card they belong to (for creating terms inside them, and saving through it). */
-  private cardEditors = new WeakMap<
-    EditorView,
-    { owner: Component; path: string; save: () => Promise<void> }
-  >();
+  /** Card editors → their card's text (for creating terms inside them, and saving through it). */
+  private cardEditors = new WeakMap<EditorView, CardText>();
   /** Windows that already have the card handling (see watchWindow). */
   private watchedWindows = new WeakSet<Window>();
 
@@ -298,9 +308,10 @@ export default class NutshellPlugin extends Plugin {
 
   /**
    * Window-wide card handling for `win`: a click outside any card (and not on
-   * a trigger) closes all; Esc closes the topmost; cards follow their term
-   * when anything scrolls (capture: scroll events don't bubble) or the window
-   * resizes, at most once per frame.
+   * a trigger) closes all, and a click in a card closes the cards stacked
+   * above it; Esc closes the topmost; cards follow their term when anything
+   * scrolls (capture: scroll events don't bubble) or the window resizes, at
+   * most once per frame.
    */
   private watchWindow(win: Window) {
     if (this.watchedWindows.has(win)) return;
@@ -312,9 +323,11 @@ export default class NutshellPlugin extends Plugin {
       // Obsidian's overlays (command palette, menus, suggestions) keep cards
       // open, so a command picked there still reaches the focused card.
       if (target?.closest(".modal-container, .menu, .suggestion-container")) return;
-      const inPopup = this.openPopups.some((p) => target && p.el.contains(target));
-      const onTrigger = target?.closest(".nutshell-trigger");
-      if (!inPopup && !onTrigger) this.closeAll();
+      // A trigger toggles its own card on click; closing here would reopen it.
+      if (target?.closest(".nutshell-trigger")) return;
+      const clicked = this.openPopups.findIndex((p) => target && p.el.contains(target));
+      if (clicked === -1) this.closeAll();
+      else if (clicked < this.openPopups.length - 1) this.closePopup(this.openPopups[clicked + 1]);
     });
     this.registerDomEvent(doc, "keydown", (e: KeyboardEvent) => {
       if (e.key === "Escape" && this.openPopups.length > 0) {
@@ -651,6 +664,16 @@ export default class NutshellPlugin extends Plugin {
       editor?.destroy();
       editor = null;
     };
+    const card: CardText = {
+      owner: component,
+      path: def.path,
+      text: () => editor?.state.doc.toString() ?? body,
+      replace: (from, to, insert) => {
+        if (editor) editor.dispatch({ changes: { from, to, insert } });
+        else body = body.slice(0, from) + insert + body.slice(to);
+      },
+      save,
+    };
     const showRendered = async () => {
       closeEditor();
       content.empty();
@@ -729,12 +752,11 @@ export default class NutshellPlugin extends Plugin {
         // cards close with this one.
         terms: {
           sourcePath: def.path,
-          open: (trigger, _path, term) =>
-            this.openCardTerm(trigger, term, view, component, def.path),
+          open: (trigger, _path, term) => this.openCardTerm(trigger, term, card),
         },
       });
       editor = view;
-      this.cardEditors.set(view, { owner: component, path: def.path, save });
+      this.cardEditors.set(view, card);
       reposition();
       const len = view.state.doc.length;
       view.dispatch({
@@ -1099,7 +1121,7 @@ export default class NutshellPlugin extends Plugin {
       changes: { from: start, to: start + label.length, insert: term },
       selection: { anchor: start + term.length },
     });
-    void this.openPopup(null, card.owner, this.cardTermLoader(view, start, card.path), {
+    void this.openPopup(null, card.owner, this.cardTermLoader(card, start), {
       anchor: () => view.coordsAtPos(start),
       column: view.contentDOM, // positioned and hidden against the outer card
       edit: true,
@@ -1107,47 +1129,41 @@ export default class NutshellPlugin extends Plugin {
     });
   }
 
-  /** Open a term clicked inside a card's editor: a link target, or the offset of an inline term in `view`. */
-  private openCardTerm(
-    trigger: HTMLElement,
-    term: string | number,
-    view: EditorView,
-    owner: Component,
-    path: string,
-  ) {
+  /** Open a term clicked inside a card's editor: a link target, or the offset of an inline term in `card`'s text. */
+  private openCardTerm(trigger: HTMLElement, term: string | number, card: CardText) {
     const load =
       typeof term === "string"
-        ? this.linkLoader(term, path)
-        : this.cardTermLoader(view, term, path);
-    this.togglePopup(trigger, owner, load);
+        ? this.linkLoader(term, card.path)
+        : this.cardTermLoader(card, term);
+    this.togglePopup(trigger, card.owner, load);
   }
 
   /**
    * Loader for the inline term at offset `at` in a card's editor. Its
-   * definition is stored inside the outer definition, so saving edits it there
-   * (the outer card then saves it to the note).
+   * definition is stored inside the outer card's text, so saving edits it
+   * there (the outer card then saves it to the note).
    */
-  private cardTermLoader(view: EditorView, at: number, path: string): DefinitionLoader {
+  private cardTermLoader(card: CardText, at: number): DefinitionLoader {
     return async () => {
-      const text = view.state.doc.toString();
+      const text = card.text();
       const hit = parseTerms(text).find((t) => t.target === null && t.from <= at && at < t.to);
       if (!hit) return "⚠️ Nutshell: couldn't find this term.";
       const ref = termRef(text, hit);
       return {
         markdown: hit.definition,
-        path,
-        // Written into the outer card's editor, then that card writes it to
-        // the note: done only when that is.
+        path: card.path,
+        // Written into the outer card's text, then that card writes it to
+        // the note: done only when that is. Works after the outer card closed
+        // too (both close in one click): its final write is still queued, and
+        // picks this change up.
         save: async (body) => {
-          const outer = this.cardEditors.get(view);
-          if (!outer || !view.dom.isConnected) throw new Error("the outer card closed");
-          const current = view.state.doc.toString();
+          const current = card.text();
           const term = findTerm(current, ref);
           if (!term) throw new Error(`couldn't find "${hit.label}" in the outer definition`);
           const next = inlineTerm(hit.label, body);
           moveRef(ref, current, term.from, next);
-          view.dispatch({ changes: { from: term.from, to: term.to, insert: next } });
-          await outer.save();
+          card.replace(term.from, term.to, next);
+          await card.save();
         },
       };
     };
